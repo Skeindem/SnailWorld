@@ -1,0 +1,87 @@
+body {
+    background-image: url(/images/BackgroundLeaves.jpg);
+    background-size: 100%;
+    background-position: top;
+    background-repeat: no-repeat;
+}
+
+
+.snailCreation, #welcomeText, .snailText, #snailName, #submitName, p, h2{
+    color: rgb(255, 255, 255);
+    text-align: center;
+    margin: 10 0 0 0;
+    font-size: large;
+    font-family: "Roboto", sans-serif;
+}
+
+#snailName, #submitName {
+    margin: 5px 0 0 0;
+    border-radius: 8px;
+    color: black;
+}
+
+.snailCreation {
+    background-color: rgba(255, 255, 255, 0.3);
+    width: 35%;
+    border-radius: 20px;
+    padding: 20px;
+    margin: 15% 0 0 30%;
+    backdrop-filter: blur(8px);
+    text-shadow: 1px 1px 6px rgba(0, 0, 0, 0.8);
+}
+
+.selectionTitle {
+    background-color: rgba(255, 255, 255, 0.3);
+    border-radius: 20px;
+    padding: 10px;
+    backdrop-filter: blur(8px);
+    text-shadow: 1px 1px 6px rgba(0, 0, 0, 0.8);
+    display: inline-block;
+}
+
+.centerTitle {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    margin-top: 100px;
+    
+}
+
+.snailTypes {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 20px;
+    margin-top: 40px;
+}
+
+span {
+    font-weight: bold;
+}
+
+.snail1, .snail2, .snail3 {
+    background-color: rgba(255, 255, 255, 0.3);
+    border-radius: 20px;
+    padding: 20px 20px 300px 20px;
+    backdrop-filter: blur(8px);
+    text-shadow: 1px 1px 6px rgba(0, 0, 0, 0.8);
+    transition: background-color 0.4s ease, transform 0.4s ease;
+}
+
+img {
+    border-radius: 15px;
+    width: 300px;
+    height: 300px;
+}
+
+
+.snail1:hover, .snail2:hover, .snail3:hover {
+    background-color: rgba(255, 255, 255, 0.4);
+    border-radius: 20px;
+    padding: 20px 20px 300px 20px;
+    backdrop-filter: blur(8px);
+    text-shadow: 1px 1px 6px rgba(0, 0, 0, 0.8);
+    transform: scale(1.03);
+
+}
