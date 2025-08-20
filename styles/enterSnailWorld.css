@@ -54,7 +54,6 @@ body {
     flex-wrap: wrap;
     gap: 20px;
     margin-top: 40px;
-    text-decoration: none;
 }
 
 span {
@@ -85,4 +84,8 @@ img {
     text-shadow: 1px 1px 6px rgba(0, 0, 0, 0.8);
     transform: scale(1.03);
 
+}
+
+.snailTypes a {
+    text-decoration: none;
 }
