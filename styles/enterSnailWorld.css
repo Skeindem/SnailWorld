@@ -2,7 +2,7 @@ body {
     background-image: url("../images/background.jpg");
     background-size: 100%;
     background-position: top;
-    background-repeat: no-repeat;
+    background-repeat: repeat
 }
 
 
@@ -12,6 +12,7 @@ body {
     margin: 10 0 0 0;
     font-size: large;
     font-family: "Roboto", sans-serif;
+    overflow-wrap: anywhere;
 }
 
 #snailName, #submitName {
@@ -28,6 +29,11 @@ body {
     margin: 15% 0 0 30%;
     backdrop-filter: blur(8px);
     text-shadow: 1px 1px 6px rgba(0, 0, 0, 0.8);
+}
+
+.snailCreation input {
+    max-width: 100%;
+    box-sizing: border-box;
 }
 
 .selectionTitle {
