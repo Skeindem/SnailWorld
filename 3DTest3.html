@@ -1,0 +1,644 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Upload GLB Viewer</title>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    #wrap { height: 100vh; width: 100vw; }
+    canvas { display: block; width: 100%; height: 100%; }
+    #ui {
+      position: fixed; top: 12px; left: 12px; z-index: 10;
+      background: rgba(255,255,255,0.92); padding: 10px 12px; border-radius: 10px;
+      font-family: system-ui, sans-serif; font-size: 14px;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.12);
+    }
+    #status { font-size: 12px; margin-top: 6px; opacity: 0.85; }
+  </style>
+
+  <!-- THIS fixes your "module specifier 'three'" error -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+
+<body>
+    <div id="ui">
+    <div>
+        <input id="file" type="file" accept=".glb,.gltf" />
+    </div>
+
+    <div style="margin-top:8px;">
+        <input id="tex" type="file" accept=".svg,image/svg+xml" />
+    </div>
+
+    <div style="margin-top:8px;">
+        <button id="reset" type="button">Reset view</button>
+    </div>
+
+    <div id="status" style="margin-top:6px;">Showing placeholder cube</div>
+
+
+
+    <div id="svgControls" style="display:none; margin-top:10px;">
+      <div style="font-size:12px; opacity:0.8; margin-bottom:6px;">SVG Parts (id starts with _3D_)</div>
+      <div id="svgParts" style="display:flex; flex-direction:column; gap:6px;"></div>
+    </div>
+
+    <div style="margin-top:8px;">
+      <button id="downloadDesign" type="button">Download Design</button>
+    </div>
+
+    <div style="margin-top:8px;">
+      <button id="refreshDesign" type="button">Refresh Design</button>
+    </div>
+
+
+    </div>
+
+
+  <div id="wrap"></div>
+
+  <script type="module">
+    import * as THREE from "three";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+    import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+
+    const wrap = document.getElementById("wrap");
+    const fileInput = document.getElementById("file");
+    const resetBtn = document.getElementById("reset");
+    const statusEl = document.getElementById("status");
+    const setStatus = (m) => { statusEl.textContent = m; console.log("[status]", m); };
+    const texInput = document.getElementById("tex");
+
+    const svgPartsEl = document.getElementById("svgParts");
+    const svgControlsEl = document.getElementById("svgControls");
+
+    const downloadBtn = document.getElementById("downloadDesign");
+
+    const refreshBtn = document.getElementById("refreshDesign");
+
+
+    const svgSerializer = new XMLSerializer();
+
+
+    let currentSvgText = null;       // editable SVG source
+    let currentModelScene = null;      // will point to gltf.scene
+    let currentBaseTexture = null;     // THREE.Texture
+
+    let svgDoc = null;           // parsed SVG document (kept, so we don’t re-parse each time)
+    let pendingRaf = 0;
+    let pendingFullTimer = 0;
+
+
+
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    wrap.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0xf2f2f2);
+
+    const camera = new THREE.PerspectiveCamera(60, 1, 0.01, 2000);
+    camera.position.set(2.2, 1.6, 2.6);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.0));
+    const dir = new THREE.DirectionalLight(0xffffff, 1.2);
+    dir.position.set(3, 5, 2);
+    scene.add(dir);
+
+    scene.add(new THREE.GridHelper(10, 10));
+    scene.add(new THREE.AxesHelper(1.5));
+
+    // Placeholder cube (always visible initially)
+    const placeholder = new THREE.Mesh(
+      new THREE.BoxGeometry(1, 1, 1),
+      new THREE.MeshStandardMaterial()
+    );
+    placeholder.position.y = 0.5;
+    scene.add(placeholder);
+
+    const modelRoot = new THREE.Group();
+    scene.add(modelRoot);
+
+    const loader = new GLTFLoader();
+
+    function parseSvgText(svgText) {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(svgText, "image/svg+xml");
+
+      // Detect parsing errors
+      const err = doc.querySelector("parsererror");
+      if (err) throw new Error("SVG parse error: " + err.textContent);
+
+      return doc;
+    }
+
+  downloadBtn.addEventListener("click", () => {
+    // Prefer the edited doc (latest), fall back to original text
+    let svgText = null;
+
+    if (svgDoc) {
+      svgText = svgSerializer.serializeToString(svgDoc.documentElement);
+    } else if (currentSvgText) {
+      svgText = currentSvgText;
+    }
+
+    if (!svgText) {
+      setStatus("No SVG loaded to download.");
+      return;
+    }
+
+    // Name: original name if available, else default
+    const base = (texInput.files?.[0]?.name || "Design.svg").replace(/\.svg$/i, "");
+    const outName = `${base}_edited.svg`;
+
+    downloadTextFile(outName, svgText, "image/svg+xml;charset=utf-8");
+    setStatus(`Downloaded: ${outName}`);
+  });
+
+
+    async function refreshDesignFromCurrentSvgText() {
+      if (!currentModelScene) {
+        setStatus("Upload a model first.");
+        return;
+      }
+      if (!currentSvgText) {
+        setStatus("No SVG loaded to refresh.");
+        return;
+      }
+
+      try {
+        // Parse + rebuild parts
+        svgDoc = parseSvgText(currentSvgText);
+        const ids = list3DPartIds(svgDoc);
+        clearSvgPartsUI();
+        buildSvgPartsUI(ids);
+
+        // Re-rasterize + apply (full-res)
+        const { w, h } = getModelBaseColorSize(currentModelScene, 2048, 2048);
+
+        if (currentBaseTexture) currentBaseTexture.dispose();
+        currentBaseTexture = await svgTextToTexture(svgSerializer.serializeToString(svgDoc.documentElement), w, h);
+        currentBaseTexture.channel = 1;
+        applyTextureToModel(currentModelScene, currentBaseTexture);
+        fixCullingAndTransparency(currentModelScene);
+
+        setStatus("Design refreshed.");
+      } catch (err) {
+        console.error(err);
+        setStatus("Refresh failed (see console).");
+      }
+    }
+
+
+    function list3DPartIds(svgDoc) {
+      const nodes = svgDoc.querySelectorAll("[id^='_3D_']");
+      const ids = [];
+      nodes.forEach(n => {
+        const id = n.getAttribute("id");
+        if (id && id.startsWith("_3D_")) ids.push(id);
+      });
+      // stable order
+      ids.sort((a,b) => a.localeCompare(b));
+      return ids;
+    }
+
+
+    function scheduleSvgTextureUpdate(isFinal) {
+      if (!svgDoc || !currentModelScene) return;
+
+      // cancel any scheduled full-res update
+      if (pendingFullTimer) {
+        clearTimeout(pendingFullTimer);
+        pendingFullTimer = 0;
+      }
+
+    function downloadTextFile(filename, text, mime = "image/svg+xml") {
+      const blob = new Blob([text], { type: mime });
+      const url = URL.createObjectURL(blob);
+
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+
+      URL.revokeObjectURL(url);
+    }
+
+
+
+
+      // preview update: max once per animation frame
+      if (pendingRaf) cancelAnimationFrame(pendingRaf);
+      pendingRaf = requestAnimationFrame(async () => {
+        pendingRaf = 0;
+
+        try {
+          const { w, h } = getModelBaseColorSize(currentModelScene, 2048, 2048);
+
+          // Preview resolution while dragging (cap to 1024 on the longest side)
+          let pw = w, ph = h;
+          if (!isFinal) {
+            const maxSide = Math.max(w, h);
+            const scale = Math.min(1024 / maxSide, 1);
+            pw = Math.max(1, Math.round(w * scale));
+            ph = Math.max(1, Math.round(h * scale));
+          }
+
+          const svgText = svgSerializer.serializeToString(svgDoc.documentElement);
+
+          if (currentBaseTexture) currentBaseTexture.dispose();
+          currentBaseTexture = await svgTextToTexture(svgText, pw, ph);
+
+          currentBaseTexture.channel = 1; // your correct UV set
+          applyTextureToModel(currentModelScene, currentBaseTexture);
+
+          // After a preview update, schedule one full-res update shortly after user stops dragging
+          if (!isFinal) {
+            pendingFullTimer = setTimeout(() => {
+              scheduleSvgTextureUpdate(true); // one full-res pass
+            }, 150);
+          }
+        } catch (err) {
+          console.error(err);
+        }
+      });
+    }
+
+
+    function clearSvgPartsUI() {
+      svgPartsEl.innerHTML = "";
+      svgControlsEl.style.display = "none";
+    }
+
+    function setSvgElementFillInDoc(svgDoc, elementId, hexColor) {
+      const el = svgDoc.getElementById(elementId);
+      if (!el) throw new Error(`Element not found in SVG: ${elementId}`);
+
+      el.setAttribute("fill", hexColor);
+
+      const style = el.getAttribute("style");
+      if (style && /fill\s*:/i.test(style)) {
+        const newStyle = style.replace(/fill\s*:\s*[^;]+/i, `fill:${hexColor}`);
+        el.setAttribute("style", newStyle);
+      }
+    }
+
+
+
+    function buildSvgPartsUI(ids) {
+      svgPartsEl.innerHTML = "";
+
+      if (!ids || ids.length === 0) {
+        svgControlsEl.style.display = "none";
+        return;
+      }
+
+      svgControlsEl.style.display = "block";
+
+      ids.forEach((id) => {
+        const row = document.createElement("div");
+        row.style.display = "flex";
+        row.style.gap = "8px";
+        row.style.alignItems = "center";
+
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = id.replace(/^_3D_/, "");
+        btn.style.padding = "6px 10px";
+        btn.style.borderRadius = "8px";
+        btn.style.border = "1px solid rgba(0,0,0,0.2)";
+        btn.style.background = "white";
+        btn.style.cursor = "pointer";
+
+        const color = document.createElement("input");
+        color.type = "color";
+        color.value = "#ff0000";
+
+        // While dragging: cheap preview updates
+        color.addEventListener("input", () => {
+          try {
+            setSvgElementFillInDoc(svgDoc, id, color.value);
+            currentSvgText = svgSerializer.serializeToString(svgDoc.documentElement);
+            scheduleSvgTextureUpdate(false);
+          } catch (e) { console.error(e); }
+        });
+
+        // On release: full-res update
+        color.addEventListener("change", () => {
+          try {
+            setSvgElementFillInDoc(svgDoc, id, color.value);
+            currentSvgText = svgSerializer.serializeToString(svgDoc.documentElement);
+            scheduleSvgTextureUpdate(true);
+          } catch (e) { console.error(e); }
+        });
+
+        row.appendChild(btn);
+        row.appendChild(color);
+        svgPartsEl.appendChild(row);
+      });
+    }
+
+
+
+
+
+  
+    function resize() {
+      const w = wrap.clientWidth;
+      const h = wrap.clientHeight;
+      renderer.setSize(w, h, false);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    function disposeMaterial(mat) {
+      for (const k in mat) {
+        const v = mat[k];
+        if (v && v.isTexture) v.dispose();
+      }
+      mat.dispose();
+    }
+    function disposeObject3D(obj) {
+      obj.traverse((c) => {
+        if (c.isMesh) {
+          c.geometry?.dispose();
+          const m = c.material;
+          if (Array.isArray(m)) m.forEach(disposeMaterial);
+          else if (m) disposeMaterial(m);
+        }
+      });
+    }
+    function clearModel() {
+      for (let i = modelRoot.children.length - 1; i >= 0; i--) {
+        const child = modelRoot.children[i];
+        modelRoot.remove(child);
+        disposeObject3D(child);
+        currentModelScene = null;
+        clearSvgPartsUI();
+        currentSvgText = null;
+      }
+    }
+
+    function fixCullingAndTransparency(root) {
+    root.traverse((obj) => {
+        if (!obj.isMesh) return;
+
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+
+        for (const mat of mats) {
+        if (!mat) continue;
+
+        // Make it render from any angle (fixes “front disappears”)
+        mat.side = THREE.DoubleSide;
+
+        // Kill any glTF “BLEND” behavior that causes sorting artifacts
+        mat.transparent = false;
+        mat.opacity = 1.0;
+        mat.alphaTest = 0.0;      // use 0.5 only if you want hard cutouts
+        mat.depthWrite = true;
+        mat.depthTest = true;
+
+        // If it’s a physical material, remove glass-like params
+        if ("transmission" in mat) mat.transmission = 0;
+        if ("thickness" in mat) mat.thickness = 0;
+
+        mat.needsUpdate = true;
+        }
+    });
+    }
+
+
+    function frameToObject(obj3d) {
+      const box = new THREE.Box3().setFromObject(obj3d);
+      const size = box.getSize(new THREE.Vector3());
+      const center = box.getCenter(new THREE.Vector3());
+      const maxDim = Math.max(size.x, size.y, size.z);
+
+      if (!isFinite(maxDim) || maxDim === 0) {
+        setStatus("Loaded, but model has no visible geometry.");
+        return;
+      }
+
+      const fov = THREE.MathUtils.degToRad(camera.fov);
+      let dist = (maxDim / 2) / Math.tan(fov / 2);
+      dist *= 1.6;
+
+      const dirVec = new THREE.Vector3(1, 0.8, 1).normalize();
+      camera.position.copy(center.clone().add(dirVec.multiplyScalar(dist)));
+      camera.near = Math.max(dist / 100, 0.01);
+      camera.far = dist * 100;
+      camera.updateProjectionMatrix();
+
+      controls.target.copy(center);
+      controls.update();
+    }
+
+    function applyTextureToModel(root, texture) {
+      if (!root || !texture) return;
+
+      // Configure the uploaded texture
+      texture.wrapS = THREE.RepeatWrapping;
+      texture.wrapT = THREE.RepeatWrapping;
+      texture.flipY = false;      // glTF convention
+      texture.channel = 1;        // TEXCOORD_1 (uv1)
+      texture.needsUpdate = true;
+
+      const TARGET_MAT_NAME = "AUD49_Front";
+
+      root.traverse((obj) => {
+        if (!obj.isMesh) return;
+
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+        for (const mat of mats) {
+          if (!mat) continue;
+
+          // Only override the intended material slot
+          if (mat.name === TARGET_MAT_NAME) {
+            mat.map = texture;
+            mat.needsUpdate = true;
+          }
+        }
+      });
+    }
+
+
+    function getModelBaseColorSize(root, fallbackW = 2048, fallbackH = 2048) {
+    let w = 0, h = 0;
+
+    root?.traverse((obj) => {
+        if (!obj.isMesh) return;
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+
+        for (const mat of mats) {
+        const map = mat?.map;
+        const img = map?.image;
+
+        // HTMLImageElement / ImageBitmap / Canvas etc.
+        const iw = img?.width || img?.naturalWidth || 0;
+        const ih = img?.height || img?.naturalHeight || 0;
+
+        if (iw > 0 && ih > 0) {
+            w = iw; h = ih;
+            break;
+        }
+        }
+    });
+
+    return (w > 0 && h > 0) ? { w, h } : { w: fallbackW, h: fallbackH };
+    }
+
+
+    async function svgTextToTexture(svgText, targetW, targetH) {
+      const svgBlob = new Blob([svgText], { type: "image/svg+xml" });
+      const url = URL.createObjectURL(svgBlob);
+
+      const img = new Image();
+      img.decoding = "async";
+
+      const loaded = new Promise((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = (e) => reject(e);
+      });
+
+      img.src = url;
+      await loaded;
+      URL.revokeObjectURL(url);
+
+      const canvas = document.createElement("canvas");
+      canvas.width = targetW;
+      canvas.height = targetH;
+
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, targetW, targetH);
+      ctx.drawImage(img, 0, 0, targetW, targetH);
+
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.anisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), 8);
+      tex.generateMipmaps = true;
+      tex.minFilter = THREE.LinearMipmapLinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+
+      return tex;
+    }
+
+texInput.addEventListener("change", async (e) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  texInput.value = "";
+
+  const name = file.name.toLowerCase();
+  if (!name.endsWith(".svg")) {
+      setStatus("Please upload an .svg file");
+      texInput.value = "";
+      return;
+  }
+
+  if (!currentModelScene) {
+      setStatus("Upload a model first, then upload a texture.");
+      return;
+  }
+
+
+  try {
+      setStatus(`Loading texture: ${file.name} ...`);
+
+      // dispose old texture if any
+      if (currentBaseTexture) currentBaseTexture.dispose();
+
+      currentSvgText = await file.text();
+
+      const doc = parseSvgText(currentSvgText);
+      const ids = list3DPartIds(doc);
+      svgDoc = doc;
+
+
+      clearSvgPartsUI();
+      buildSvgPartsUI(ids);
+
+      const { w, h } = getModelBaseColorSize(currentModelScene, 2048, 2048);
+
+      if (currentBaseTexture) currentBaseTexture.dispose();
+      currentBaseTexture = await svgTextToTexture(currentSvgText, w, h);
+      currentBaseTexture.channel = 1; // your correct channel
+      applyTextureToModel(currentModelScene, currentBaseTexture);
+      fixCullingAndTransparency(currentModelScene);
+
+      setStatus(`Applied texture: ${file.name}`);
+  } catch (err) {
+      console.error(err);
+      setStatus("Failed to load SVG texture (see console).");
+  }
+  });
+
+
+    function resetView() {
+      if (modelRoot.children.length > 0) frameToObject(modelRoot);
+      else frameToObject(placeholder);
+    }
+    resetBtn.addEventListener("click", resetView);
+    frameToObject(placeholder);
+
+    fileInput.addEventListener("change", (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+
+      const name = file.name.toLowerCase();
+      if (!name.endsWith(".glb") && !name.endsWith(".gltf")) {
+        setStatus("Please upload a .glb or .gltf file");
+        fileInput.value = "";
+        return;
+      }
+
+      setStatus(`Loading: ${file.name} ...`);
+      clearModel();
+
+      const url = URL.createObjectURL(file);
+      loader.load(
+        url,
+        (gltf) => {
+          URL.revokeObjectURL(url);
+          placeholder.visible = false;
+          modelRoot.add(gltf.scene);
+          currentModelScene = gltf.scene;
+          fixCullingAndTransparency(currentModelScene);
+          setStatus(`Loaded: ${file.name}`);
+          frameToObject(gltf.scene);
+        },
+        undefined,
+        (err) => {
+          URL.revokeObjectURL(url);
+          console.error(err);
+          placeholder.visible = true;
+          setStatus("Failed to load model (see console).");
+        }
+      );
+    });
+
+    function animate() {
+      requestAnimationFrame(animate);
+      if (placeholder.visible) placeholder.rotation.y += 0.01;
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    animate();
+  </script>
+</body>
+</html>

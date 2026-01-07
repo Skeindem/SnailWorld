@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Upload GLB Viewer</title>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    #wrap { height: 100vh; width: 100vw; }
+    canvas { display: block; width: 100%; height: 100%; }
+    #ui {
+      position: fixed; top: 12px; left: 12px; z-index: 10;
+      background: rgba(255,255,255,0.92); padding: 10px 12px; border-radius: 10px;
+      font-family: system-ui, sans-serif; font-size: 14px;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.12);
+    }
+    #status { font-size: 12px; margin-top: 6px; opacity: 0.85; }
+  </style>
+
+  <!-- THIS fixes your "module specifier 'three'" error -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+
+<body>
+    <div id="ui">
+    <div>
+        <input id="file" type="file" accept=".glb,.gltf" />
+    </div>
+
+    <div style="margin-top:8px;">
+        <input id="tex" type="file" accept=".svg,image/svg+xml" />
+    </div>
+
+    <div style="margin-top:8px;">
+        <button id="reset" type="button">Reset view</button>
+    </div>
+
+    <div id="status" style="margin-top:6px;">Showing placeholder cube</div>
+    </div>
+
+
+  <div id="wrap"></div>
+
+  <script type="module">
+    import * as THREE from "three";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+    import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+
+    const wrap = document.getElementById("wrap");
+    const fileInput = document.getElementById("file");
+    const resetBtn = document.getElementById("reset");
+    const statusEl = document.getElementById("status");
+    const setStatus = (m) => { statusEl.textContent = m; console.log("[status]", m); };
+    const texInput = document.getElementById("tex");
+
+    let currentModelScene = null;      // will point to gltf.scene
+    let currentBaseTexture = null;     // THREE.Texture
+
+
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    wrap.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0xf2f2f2);
+
+    const camera = new THREE.PerspectiveCamera(60, 1, 0.01, 2000);
+    camera.position.set(2.2, 1.6, 2.6);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.0));
+    const dir = new THREE.DirectionalLight(0xffffff, 1.2);
+    dir.position.set(3, 5, 2);
+    scene.add(dir);
+
+    scene.add(new THREE.GridHelper(10, 10));
+    scene.add(new THREE.AxesHelper(1.5));
+
+    // Placeholder cube (always visible initially)
+    const placeholder = new THREE.Mesh(
+      new THREE.BoxGeometry(1, 1, 1),
+      new THREE.MeshStandardMaterial()
+    );
+    placeholder.position.y = 0.5;
+    scene.add(placeholder);
+
+    const modelRoot = new THREE.Group();
+    scene.add(modelRoot);
+
+    const loader = new GLTFLoader();
+
+    function resize() {
+      const w = wrap.clientWidth;
+      const h = wrap.clientHeight;
+      renderer.setSize(w, h, false);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    function disposeMaterial(mat) {
+      for (const k in mat) {
+        const v = mat[k];
+        if (v && v.isTexture) v.dispose();
+      }
+      mat.dispose();
+    }
+    function disposeObject3D(obj) {
+      obj.traverse((c) => {
+        if (c.isMesh) {
+          c.geometry?.dispose();
+          const m = c.material;
+          if (Array.isArray(m)) m.forEach(disposeMaterial);
+          else if (m) disposeMaterial(m);
+        }
+      });
+    }
+    function clearModel() {
+      for (let i = modelRoot.children.length - 1; i >= 0; i--) {
+        const child = modelRoot.children[i];
+        modelRoot.remove(child);
+        disposeObject3D(child);
+        currentModelScene = null;
+      }
+    }
+
+    function fixCullingAndTransparency(root) {
+    root.traverse((obj) => {
+        if (!obj.isMesh) return;
+
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+
+        for (const mat of mats) {
+        if (!mat) continue;
+
+        // Make it render from any angle (fixes “front disappears”)
+        mat.side = THREE.DoubleSide;
+
+        // Kill any glTF “BLEND” behavior that causes sorting artifacts
+        mat.transparent = false;
+        mat.opacity = 1.0;
+        mat.alphaTest = 0.0;      // use 0.5 only if you want hard cutouts
+        mat.depthWrite = true;
+        mat.depthTest = true;
+
+        // If it’s a physical material, remove glass-like params
+        if ("transmission" in mat) mat.transmission = 0;
+        if ("thickness" in mat) mat.thickness = 0;
+
+        mat.needsUpdate = true;
+        }
+    });
+    }
+
+
+    function frameToObject(obj3d) {
+      const box = new THREE.Box3().setFromObject(obj3d);
+      const size = box.getSize(new THREE.Vector3());
+      const center = box.getCenter(new THREE.Vector3());
+      const maxDim = Math.max(size.x, size.y, size.z);
+
+      if (!isFinite(maxDim) || maxDim === 0) {
+        setStatus("Loaded, but model has no visible geometry.");
+        return;
+      }
+
+      const fov = THREE.MathUtils.degToRad(camera.fov);
+      let dist = (maxDim / 2) / Math.tan(fov / 2);
+      dist *= 1.6;
+
+      const dirVec = new THREE.Vector3(1, 0.8, 1).normalize();
+      camera.position.copy(center.clone().add(dirVec.multiplyScalar(dist)));
+      camera.near = Math.max(dist / 100, 0.01);
+      camera.far = dist * 100;
+      camera.updateProjectionMatrix();
+
+      controls.target.copy(center);
+      controls.update();
+    }
+
+    function applyTextureToModel(root, texture) {
+    if (!root || !texture) return;
+
+    // Make it look like a normal “color map”
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    texture.flipY = false; // glTF convention
+    texture.channel = 1; // use TEXCOORD_1 (uv1) instead of TEXCOORD_0 (uv)
+    texture.needsUpdate = true;
+    
+
+
+    
+    root.traverse((obj) => {
+        if (!obj.isMesh) return;
+
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+        for (const mat of mats) {
+        if (!mat) continue;
+
+        mat.map = texture;
+        mat.needsUpdate = true;
+
+        }
+    });
+    }
+
+    function getModelBaseColorSize(root, fallbackW = 2048, fallbackH = 2048) {
+    let w = 0, h = 0;
+
+    root?.traverse((obj) => {
+        if (!obj.isMesh) return;
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+
+        for (const mat of mats) {
+        const map = mat?.map;
+        const img = map?.image;
+
+        // HTMLImageElement / ImageBitmap / Canvas etc.
+        const iw = img?.width || img?.naturalWidth || 0;
+        const ih = img?.height || img?.naturalHeight || 0;
+
+        if (iw > 0 && ih > 0) {
+            w = iw; h = ih;
+            break;
+        }
+        }
+    });
+
+    return (w > 0 && h > 0) ? { w, h } : { w: fallbackW, h: fallbackH };
+    }
+
+
+    async function svgFileToTexture(file, targetW, targetH) {
+    const svgText = await file.text();
+
+    const svgBlob = new Blob([svgText], { type: "image/svg+xml" });
+    const url = URL.createObjectURL(svgBlob);
+
+    const img = new Image();
+    img.decoding = "async";
+
+    const loaded = new Promise((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = (e) => reject(e);
+    });
+
+    img.src = url;
+    await loaded;
+    URL.revokeObjectURL(url);
+
+    const canvas = document.createElement("canvas");
+    canvas.width = targetW;
+    canvas.height = targetH;
+    const ctx = canvas.getContext("2d");
+
+    // Fill entire canvas (no letterboxing/padding)
+    ctx.clearRect(0, 0, targetW, targetH);
+    ctx.drawImage(img, 0, 0, targetW, targetH);
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), 8);
+    tex.generateMipmaps = true;
+    tex.minFilter = THREE.LinearMipmapLinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+
+    return tex;
+    }
+
+
+
+    function resetView() {
+      if (modelRoot.children.length > 0) frameToObject(modelRoot);
+      else frameToObject(placeholder);
+    }
+    resetBtn.addEventListener("click", resetView);
+    frameToObject(placeholder);
+
+    fileInput.addEventListener("change", (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+
+      const name = file.name.toLowerCase();
+      if (!name.endsWith(".glb") && !name.endsWith(".gltf")) {
+        setStatus("Please upload a .glb or .gltf file");
+        fileInput.value = "";
+        return;
+      }
+
+    texInput.addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const name = file.name.toLowerCase();
+    if (!name.endsWith(".svg")) {
+        setStatus("Please upload an .svg file");
+        texInput.value = "";
+        return;
+    }
+
+    if (!currentModelScene) {
+        setStatus("Upload a model first, then upload a texture.");
+        return;
+    }
+
+    try {
+        setStatus(`Loading texture: ${file.name} ...`);
+
+        // dispose old texture if any
+        if (currentBaseTexture) currentBaseTexture.dispose();
+
+        const { w, h } = getModelBaseColorSize(currentModelScene, 2048, 2048);
+        currentBaseTexture = await svgFileToTexture(file, w, h);
+        applyTextureToModel(currentModelScene, currentBaseTexture);
+        fixCullingAndTransparency(currentModelScene);
+
+        setStatus(`Applied texture: ${file.name}`);
+    } catch (err) {
+        console.error(err);
+        setStatus("Failed to load SVG texture (see console).");
+    }
+    });
+
+
+      setStatus(`Loading: ${file.name} ...`);
+      clearModel();
+
+      const url = URL.createObjectURL(file);
+      loader.load(
+        url,
+        (gltf) => {
+          URL.revokeObjectURL(url);
+          placeholder.visible = false;
+          modelRoot.add(gltf.scene);
+          currentModelScene = gltf.scene;
+          fixCullingAndTransparency(currentModelScene);
+          setStatus(`Loaded: ${file.name}`);
+          frameToObject(gltf.scene);
+        },
+        undefined,
+        (err) => {
+          URL.revokeObjectURL(url);
+          console.error(err);
+          placeholder.visible = true;
+          setStatus("Failed to load model (see console).");
+        }
+      );
+    });
+
+    function animate() {
+      requestAnimationFrame(animate);
+      if (placeholder.visible) placeholder.rotation.y += 0.01;
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    animate();
+  </script>
+</body>
+</html>
