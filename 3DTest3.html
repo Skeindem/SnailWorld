@@ -13,11 +13,27 @@
       background: rgba(255,255,255,0.92); padding: 10px 12px; border-radius: 10px;
       font-family: system-ui, sans-serif; font-size: 14px;
       box-shadow: 0 6px 18px rgba(0,0,0,0.12);
+      max-width: 320px;
     }
-    #status { font-size: 12px; margin-top: 6px; opacity: 0.85; }
+    #status { font-size: 12px; margin-top: 6px; opacity: 0.85; white-space: pre-wrap; }
+    .mini {
+      font-size: 12px;
+      opacity: 0.85;
+      margin-top: 6px;
+    }
+    .row {
+      margin-top: 8px;
+    }
+    .row label {
+      font-size: 12px;
+      display: inline-block;
+      margin-right: 8px;
+    }
+    .row input[type="number"] {
+      width: 64px;
+    }
   </style>
 
-  <!-- THIS fixes your "module specifier 'three'" error -->
   <script type="importmap">
   {
     "imports": {
@@ -29,39 +45,59 @@
 </head>
 
 <body>
-    <div id="ui">
+  <div id="ui">
     <div>
-        <input id="file" type="file" accept=".glb,.gltf" />
+      <input id="file" type="file" accept=".glb,.gltf" />
     </div>
 
-    <div style="margin-top:8px;">
-        <input id="tex" type="file" accept=".svg,image/svg+xml" />
+    <div class="row">
+      <input id="tex" type="file" accept=".svg,image/svg+xml" />
     </div>
 
-    <div style="margin-top:8px;">
-        <button id="reset" type="button">Reset view</button>
+    <div class="row">
+      <input id="fabricMaps" type="file" multiple accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" />
     </div>
 
-    <div id="status" style="margin-top:6px;">Showing placeholder cube</div>
+    <div class="row">
+      <label>Fabric repeat:
+        <input id="fabricRepeat" type="number" value="9" min="1" step="1" />
+      </label>
+      <label>Normal strength:
+        <input id="fabricStrength" type="number" value="1" min="0" step="0.1" />
+      </label>
+    </div>
 
+    <div class="row">
+      <label>Displacement:
+        <input id="fabricDispStrength" type="number" value="0.02" min="0" step="0.001" />
+      </label>
+    </div>
 
+    <div class="row">
+      <button id="reset" type="button">Reset view</button>
+    </div>
+
+    <div id="status" class="row">Showing placeholder cube</div>
 
     <div id="svgControls" style="display:none; margin-top:10px;">
-      <div style="font-size:12px; opacity:0.8; margin-bottom:6px;">SVG Parts (id starts with _3D_)</div>
+      <div class="mini">SVG Parts (id starts with _3D_)</div>
       <div id="svgParts" style="display:flex; flex-direction:column; gap:6px;"></div>
     </div>
 
-    <div style="margin-top:8px;">
+    <div class="row">
       <button id="downloadDesign" type="button">Download Design</button>
     </div>
 
-    <div style="margin-top:8px;">
+    <div class="row">
       <button id="refreshDesign" type="button">Refresh Design</button>
     </div>
 
-
+    <div class="mini" style="margin-top:10px;">
+      Fabric pack roles by filename suffix:<br>
+      _NRM, _ALPHA, _ROUGH, _MTL, _AO, _DISP<br>
+      _BASE is ignored.
     </div>
-
+  </div>
 
   <div id="wrap"></div>
 
@@ -70,38 +106,54 @@
     import { OrbitControls } from "three/addons/controls/OrbitControls.js";
     import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
+    const TARGET_MAT_NAME = "AUD49_Front";
+
     const wrap = document.getElementById("wrap");
     const fileInput = document.getElementById("file");
-    const resetBtn = document.getElementById("reset");
-    const statusEl = document.getElementById("status");
-    const setStatus = (m) => { statusEl.textContent = m; console.log("[status]", m); };
     const texInput = document.getElementById("tex");
+    const fabricMapsInput = document.getElementById("fabricMaps");
+    const fabricRepeatInput = document.getElementById("fabricRepeat");
+    const fabricStrengthInput = document.getElementById("fabricStrength");
+    const fabricDispStrengthInput = document.getElementById("fabricDispStrength");
+    const resetBtn = document.getElementById("reset");
+    const refreshBtn = document.getElementById("refreshDesign");
+    const downloadBtn = document.getElementById("downloadDesign");
 
+    const statusEl = document.getElementById("status");
     const svgPartsEl = document.getElementById("svgParts");
     const svgControlsEl = document.getElementById("svgControls");
 
-    const downloadBtn = document.getElementById("downloadDesign");
-
-    const refreshBtn = document.getElementById("refreshDesign");
-
+    const setStatus = (m) => {
+      statusEl.textContent = m;
+      console.log("[status]", m);
+    };
 
     const svgSerializer = new XMLSerializer();
 
+    let currentSvgText = null;
+    let currentModelScene = null;
+    let currentBaseTexture = null;
+    let svgDoc = null;
 
-    let currentSvgText = null;       // editable SVG source
-    let currentModelScene = null;      // will point to gltf.scene
-    let currentBaseTexture = null;     // THREE.Texture
-
-    let svgDoc = null;           // parsed SVG document (kept, so we don’t re-parse each time)
     let pendingRaf = 0;
     let pendingFullTimer = 0;
 
-
-
+    let currentFabricSet = {
+      normal: null,
+      alpha: null,
+      rough: null,
+      metal: null,
+      ao: null,
+      disp: null,
+      bump: null,
+      base: null
+    };
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     wrap.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
@@ -113,20 +165,32 @@
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
 
-    scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.0));
-    const dir = new THREE.DirectionalLight(0xffffff, 1.2);
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 3.0));
+
+    const dir = new THREE.DirectionalLight(0xffffff, 0.3);
     dir.position.set(3, 5, 2);
+    dir.castShadow = true;
+    dir.shadow.mapSize.width = 2048;
+    dir.shadow.mapSize.height = 2048;
+    dir.shadow.camera.near = 0.5;
+    dir.shadow.camera.far = 30;
+    dir.shadow.camera.left = -10;
+    dir.shadow.camera.right = 10;
+    dir.shadow.camera.top = 10;
+    dir.shadow.camera.bottom = -10;
+    dir.shadow.bias = -0.0005;
     scene.add(dir);
 
     scene.add(new THREE.GridHelper(10, 10));
     scene.add(new THREE.AxesHelper(1.5));
 
-    // Placeholder cube (always visible initially)
     const placeholder = new THREE.Mesh(
       new THREE.BoxGeometry(1, 1, 1),
       new THREE.MeshStandardMaterial()
     );
     placeholder.position.y = 0.5;
+    placeholder.castShadow = true;
+    placeholder.receiveShadow = true;
     scene.add(placeholder);
 
     const modelRoot = new THREE.Group();
@@ -134,155 +198,82 @@
 
     const loader = new GLTFLoader();
 
-    function parseSvgText(svgText) {
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(svgText, "image/svg+xml");
-
-      // Detect parsing errors
-      const err = doc.querySelector("parsererror");
-      if (err) throw new Error("SVG parse error: " + err.textContent);
-
-      return doc;
+    function getFabricRepeat() {
+      return parseFloat(fabricRepeatInput?.value || "9");
     }
 
-  downloadBtn.addEventListener("click", () => {
-    // Prefer the edited doc (latest), fall back to original text
-    let svgText = null;
-
-    if (svgDoc) {
-      svgText = svgSerializer.serializeToString(svgDoc.documentElement);
-    } else if (currentSvgText) {
-      svgText = currentSvgText;
+    function getFabricStrength() {
+      return parseFloat(fabricStrengthInput?.value || "1");
     }
 
-    if (!svgText) {
-      setStatus("No SVG loaded to download.");
-      return;
+    function getFabricDispStrength() {
+      return parseFloat(fabricDispStrengthInput?.value || "0.02");
     }
 
-    // Name: original name if available, else default
-    const base = (texInput.files?.[0]?.name || "Design.svg").replace(/\.svg$/i, "");
-    const outName = `${base}_edited.svg`;
+    function isPersistentTexture(tex) {
+      if (!tex) return false;
+      if (tex === currentBaseTexture) return true;
 
-    downloadTextFile(outName, svgText, "image/svg+xml;charset=utf-8");
-    setStatus(`Downloaded: ${outName}`);
-  });
-
-
-    async function refreshDesignFromCurrentSvgText() {
-      if (!currentModelScene) {
-        setStatus("Upload a model first.");
-        return;
+      const vals = Object.values(currentFabricSet);
+      for (const t of vals) {
+        if (t && tex === t) return true;
       }
-      if (!currentSvgText) {
-        setStatus("No SVG loaded to refresh.");
-        return;
-      }
-
-      try {
-        // Parse + rebuild parts
-        svgDoc = parseSvgText(currentSvgText);
-        const ids = list3DPartIds(svgDoc);
-        clearSvgPartsUI();
-        buildSvgPartsUI(ids);
-
-        // Re-rasterize + apply (full-res)
-        const { w, h } = getModelBaseColorSize(currentModelScene, 2048, 2048);
-
-        if (currentBaseTexture) currentBaseTexture.dispose();
-        currentBaseTexture = await svgTextToTexture(svgSerializer.serializeToString(svgDoc.documentElement), w, h);
-        currentBaseTexture.channel = 1;
-        applyTextureToModel(currentModelScene, currentBaseTexture);
-        fixCullingAndTransparency(currentModelScene);
-
-        setStatus("Design refreshed.");
-      } catch (err) {
-        console.error(err);
-        setStatus("Refresh failed (see console).");
-      }
+      return false;
     }
 
-
-    function list3DPartIds(svgDoc) {
-      const nodes = svgDoc.querySelectorAll("[id^='_3D_']");
-      const ids = [];
-      nodes.forEach(n => {
-        const id = n.getAttribute("id");
-        if (id && id.startsWith("_3D_")) ids.push(id);
-      });
-      // stable order
-      ids.sort((a,b) => a.localeCompare(b));
-      return ids;
-    }
-
-
-    function scheduleSvgTextureUpdate(isFinal) {
-      if (!svgDoc || !currentModelScene) return;
-
-      // cancel any scheduled full-res update
-      if (pendingFullTimer) {
-        clearTimeout(pendingFullTimer);
-        pendingFullTimer = 0;
+    function disposeMaterial(mat) {
+      for (const k in mat) {
+        const v = mat[k];
+        if (v && v.isTexture && !isPersistentTexture(v)) {
+          v.dispose();
+        }
       }
-
-    function downloadTextFile(filename, text, mime = "image/svg+xml") {
-      const blob = new Blob([text], { type: mime });
-      const url = URL.createObjectURL(blob);
-
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-
-      URL.revokeObjectURL(url);
+      mat.dispose();
     }
 
-
-
-
-      // preview update: max once per animation frame
-      if (pendingRaf) cancelAnimationFrame(pendingRaf);
-      pendingRaf = requestAnimationFrame(async () => {
-        pendingRaf = 0;
-
-        try {
-          const { w, h } = getModelBaseColorSize(currentModelScene, 2048, 2048);
-
-          // Preview resolution while dragging (cap to 1024 on the longest side)
-          let pw = w, ph = h;
-          if (!isFinal) {
-            const maxSide = Math.max(w, h);
-            const scale = Math.min(1024 / maxSide, 1);
-            pw = Math.max(1, Math.round(w * scale));
-            ph = Math.max(1, Math.round(h * scale));
-          }
-
-          const svgText = svgSerializer.serializeToString(svgDoc.documentElement);
-
-          if (currentBaseTexture) currentBaseTexture.dispose();
-          currentBaseTexture = await svgTextToTexture(svgText, pw, ph);
-
-          currentBaseTexture.channel = 1; // your correct UV set
-          applyTextureToModel(currentModelScene, currentBaseTexture);
-
-          // After a preview update, schedule one full-res update shortly after user stops dragging
-          if (!isFinal) {
-            pendingFullTimer = setTimeout(() => {
-              scheduleSvgTextureUpdate(true); // one full-res pass
-            }, 150);
-          }
-        } catch (err) {
-          console.error(err);
+    function disposeObject3D(obj) {
+      obj.traverse((c) => {
+        if (c.isMesh) {
+          c.geometry?.dispose();
+          const m = c.material;
+          if (Array.isArray(m)) m.forEach(disposeMaterial);
+          else if (m) disposeMaterial(m);
         }
       });
     }
 
+    function disposeFabricSet(setObj) {
+      if (!setObj) return;
+      for (const k of Object.keys(setObj)) {
+        if (setObj[k] && setObj[k].isTexture) {
+          setObj[k].dispose();
+          setObj[k] = null;
+        }
+      }
+    }
+
+    function parseSvgText(svgText) {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(svgText, "image/svg+xml");
+      const err = doc.querySelector("parsererror");
+      if (err) throw new Error("SVG parse error: " + err.textContent);
+      return doc;
+    }
 
     function clearSvgPartsUI() {
       svgPartsEl.innerHTML = "";
       svgControlsEl.style.display = "none";
+    }
+
+    function list3DPartIds(svgDoc) {
+      const nodes = svgDoc.querySelectorAll("[id^='_3D_']");
+      const ids = [];
+      nodes.forEach((n) => {
+        const id = n.getAttribute("id");
+        if (id && id.startsWith("_3D_")) ids.push(id);
+      });
+      ids.sort((a, b) => a.localeCompare(b));
+      return ids;
     }
 
     function setSvgElementFillInDoc(svgDoc, elementId, hexColor) {
@@ -297,8 +288,6 @@
         el.setAttribute("style", newStyle);
       }
     }
-
-
 
     function buildSvgPartsUI(ids) {
       svgPartsEl.innerHTML = "";
@@ -329,22 +318,24 @@
         color.type = "color";
         color.value = "#ff0000";
 
-        // While dragging: cheap preview updates
         color.addEventListener("input", () => {
           try {
             setSvgElementFillInDoc(svgDoc, id, color.value);
             currentSvgText = svgSerializer.serializeToString(svgDoc.documentElement);
             scheduleSvgTextureUpdate(false);
-          } catch (e) { console.error(e); }
+          } catch (e) {
+            console.error(e);
+          }
         });
 
-        // On release: full-res update
         color.addEventListener("change", () => {
           try {
             setSvgElementFillInDoc(svgDoc, id, color.value);
             currentSvgText = svgSerializer.serializeToString(svgDoc.documentElement);
             scheduleSvgTextureUpdate(true);
-          } catch (e) { console.error(e); }
+          } catch (e) {
+            console.error(e);
+          }
         });
 
         row.appendChild(btn);
@@ -353,11 +344,6 @@
       });
     }
 
-
-
-
-
-  
     function resize() {
       const w = wrap.clientWidth;
       const h = wrap.clientHeight;
@@ -368,62 +354,34 @@
     window.addEventListener("resize", resize);
     resize();
 
-    function disposeMaterial(mat) {
-      for (const k in mat) {
-        const v = mat[k];
-        if (v && v.isTexture) v.dispose();
-      }
-      mat.dispose();
-    }
-    function disposeObject3D(obj) {
-      obj.traverse((c) => {
-        if (c.isMesh) {
-          c.geometry?.dispose();
-          const m = c.material;
-          if (Array.isArray(m)) m.forEach(disposeMaterial);
-          else if (m) disposeMaterial(m);
-        }
-      });
-    }
     function clearModel() {
       for (let i = modelRoot.children.length - 1; i >= 0; i--) {
         const child = modelRoot.children[i];
         modelRoot.remove(child);
         disposeObject3D(child);
-        currentModelScene = null;
-        clearSvgPartsUI();
-        currentSvgText = null;
       }
+
+      currentModelScene = null;
+      clearSvgPartsUI();
+      currentSvgText = currentSvgText;
     }
 
     function fixCullingAndTransparency(root) {
-    root.traverse((obj) => {
+      root.traverse((obj) => {
         if (!obj.isMesh) return;
 
+        obj.castShadow = true;
+        obj.receiveShadow = true;
+
         const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
-
         for (const mat of mats) {
-        if (!mat) continue;
-
-        // Make it render from any angle (fixes “front disappears”)
-        mat.side = THREE.DoubleSide;
-
-        // Kill any glTF “BLEND” behavior that causes sorting artifacts
-        mat.transparent = false;
-        mat.opacity = 1.0;
-        mat.alphaTest = 0.0;      // use 0.5 only if you want hard cutouts
-        mat.depthWrite = true;
-        mat.depthTest = true;
-
-        // If it’s a physical material, remove glass-like params
-        if ("transmission" in mat) mat.transmission = 0;
-        if ("thickness" in mat) mat.thickness = 0;
-
-        mat.needsUpdate = true;
+          if (!mat) continue;
+          mat.depthWrite = true;
+          mat.depthTest = true;
+          mat.needsUpdate = true;
         }
-    });
+      });
     }
-
 
     function frameToObject(obj3d) {
       const box = new THREE.Box3().setFromObject(obj3d);
@@ -450,60 +408,30 @@
       controls.update();
     }
 
-    function applyTextureToModel(root, texture) {
-      if (!root || !texture) return;
+    async function imageFileToTexture(file, isColor = false) {
+      const url = URL.createObjectURL(file);
 
-      // Configure the uploaded texture
-      texture.wrapS = THREE.RepeatWrapping;
-      texture.wrapT = THREE.RepeatWrapping;
-      texture.flipY = false;      // glTF convention
-      texture.channel = 1;        // TEXCOORD_1 (uv1)
-      texture.needsUpdate = true;
+      try {
+        const img = new Image();
+        img.decoding = "async";
 
-      const TARGET_MAT_NAME = "AUD49_Front";
+        await new Promise((resolve, reject) => {
+          img.onload = resolve;
+          img.onerror = reject;
+          img.src = url;
+        });
 
-      root.traverse((obj) => {
-        if (!obj.isMesh) return;
-
-        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
-        for (const mat of mats) {
-          if (!mat) continue;
-
-          // Only override the intended material slot
-          if (mat.name === TARGET_MAT_NAME) {
-            mat.map = texture;
-            mat.needsUpdate = true;
-          }
-        }
-      });
+        const tex = new THREE.Texture(img);
+        tex.wrapS = THREE.RepeatWrapping;
+        tex.wrapT = THREE.RepeatWrapping;
+        tex.flipY = false;
+        tex.colorSpace = isColor ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+        tex.needsUpdate = true;
+        return tex;
+      } finally {
+        URL.revokeObjectURL(url);
+      }
     }
-
-
-    function getModelBaseColorSize(root, fallbackW = 2048, fallbackH = 2048) {
-    let w = 0, h = 0;
-
-    root?.traverse((obj) => {
-        if (!obj.isMesh) return;
-        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
-
-        for (const mat of mats) {
-        const map = mat?.map;
-        const img = map?.image;
-
-        // HTMLImageElement / ImageBitmap / Canvas etc.
-        const iw = img?.width || img?.naturalWidth || 0;
-        const ih = img?.height || img?.naturalHeight || 0;
-
-        if (iw > 0 && ih > 0) {
-            w = iw; h = ih;
-            break;
-        }
-        }
-    });
-
-    return (w > 0 && h > 0) ? { w, h } : { w: fallbackW, h: fallbackH };
-    }
-
 
     async function svgTextToTexture(svgText, targetW, targetH) {
       const svgBlob = new Blob([svgText], { type: "image/svg+xml" });
@@ -535,64 +463,490 @@
       tex.generateMipmaps = true;
       tex.minFilter = THREE.LinearMipmapLinearFilter;
       tex.magFilter = THREE.LinearFilter;
-
       return tex;
     }
 
-texInput.addEventListener("change", async (e) => {
-  const file = e.target.files?.[0];
-  if (!file) return;
-  texInput.value = "";
+    function getModelBaseColorSize(root, fallbackW = 2048, fallbackH = 2048) {
+      let w = 0, h = 0;
 
-  const name = file.name.toLowerCase();
-  if (!name.endsWith(".svg")) {
-      setStatus("Please upload an .svg file");
+      root?.traverse((obj) => {
+        if (!obj.isMesh) return;
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+
+        for (const mat of mats) {
+          const map = mat?.map;
+          const img = map?.image;
+          const iw = img?.width || img?.naturalWidth || 0;
+          const ih = img?.height || img?.naturalHeight || 0;
+
+          if (iw > 0 && ih > 0) {
+            w = iw;
+            h = ih;
+            break;
+          }
+        }
+      });
+
+      return (w > 0 && h > 0) ? { w, h } : { w: fallbackW, h: fallbackH };
+    }
+
+    function applyTextureToModel(root, texture) {
+      if (!root || !texture) return;
+
+      texture.wrapS = THREE.RepeatWrapping;
+      texture.wrapT = THREE.RepeatWrapping;
+      texture.flipY = false;
+      texture.channel = 1;
+      texture.needsUpdate = true;
+
+      root.traverse((obj) => {
+        if (!obj.isMesh) return;
+
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+        for (const mat of mats) {
+          if (!mat) continue;
+          if (mat.name === TARGET_MAT_NAME) {
+            mat.map = texture;
+            mat.needsUpdate = true;
+          }
+        }
+      });
+    }
+
+    function getNormalReferenceSettings(mat) {
+      const src = mat.normalMap;
+
+      if (!src) {
+        return {
+          channel: 0,
+          wrapS: THREE.RepeatWrapping,
+          wrapT: THREE.RepeatWrapping,
+          repeat: new THREE.Vector2(1, 1),
+          offset: new THREE.Vector2(0, 0),
+          rotation: 0,
+          center: new THREE.Vector2(0, 0),
+          flipY: false
+        };
+      }
+
+      return {
+        channel: src.channel,
+        wrapS: src.wrapS,
+        wrapT: src.wrapT,
+        repeat: src.repeat.clone(),
+        offset: src.offset.clone(),
+        rotation: src.rotation,
+        center: src.center.clone(),
+        flipY: src.flipY
+      };
+    }
+
+    function applyFabricUtilityTiling(tex, mat) {
+      if (!tex) return;
+
+      const ref = getNormalReferenceSettings(mat);
+      const fabricRepeat = getFabricRepeat();
+
+      tex.channel = ref.channel;
+      tex.wrapS = THREE.RepeatWrapping;
+      tex.wrapT = THREE.RepeatWrapping;
+      tex.repeat.copy(ref.repeat).multiplyScalar(fabricRepeat);
+      tex.offset.copy(ref.offset);
+      tex.rotation = ref.rotation;
+      tex.center.copy(ref.center);
+      tex.flipY = ref.flipY;
+      tex.needsUpdate = true;
+    }
+
+    function enableFabricDetailNormal(mat, detailTexture, options = {}) {
+      if (!mat || !detailTexture) return;
+
+      const repeat = options.repeat ?? getFabricRepeat();
+      const strength = options.strength ?? getFabricStrength();
+
+      detailTexture.wrapS = THREE.RepeatWrapping;
+      detailTexture.wrapT = THREE.RepeatWrapping;
+      detailTexture.flipY = false;
+      detailTexture.needsUpdate = true;
+
+      mat.userData.fabricDetailNormal = {
+        texture: detailTexture,
+        repeat: new THREE.Vector2(repeat, repeat),
+        strength: strength,
+        shader: null
+      };
+
+      if (mat.userData.fabricDetailNormalPatched) {
+        const data = mat.userData.fabricDetailNormal;
+        if (data.shader) {
+          data.shader.uniforms.fabricDetailNormalMap.value = detailTexture;
+          data.shader.uniforms.fabricDetailNormalRepeat.value.copy(data.repeat);
+          data.shader.uniforms.fabricDetailNormalStrength.value = data.strength;
+        }
+        mat.needsUpdate = true;
+        return;
+      }
+
+      mat.userData.fabricDetailNormalPatched = true;
+
+      mat.onBeforeCompile = (shader) => {
+        const data = mat.userData.fabricDetailNormal;
+
+        shader.uniforms.fabricDetailNormalMap = { value: data.texture };
+        shader.uniforms.fabricDetailNormalRepeat = { value: data.repeat.clone() };
+        shader.uniforms.fabricDetailNormalStrength = { value: data.strength };
+
+        shader.fragmentShader = `
+          uniform sampler2D fabricDetailNormalMap;
+          uniform vec2 fabricDetailNormalRepeat;
+          uniform float fabricDetailNormalStrength;
+        ` + shader.fragmentShader;
+
+        shader.fragmentShader = shader.fragmentShader.replace(
+          "#include <normal_fragment_maps>",
+          `
+          #include <normal_fragment_maps>
+
+          #ifdef USE_NORMALMAP
+            vec3 fabricN = texture2D( fabricDetailNormalMap, vNormalMapUv * fabricDetailNormalRepeat ).xyz * 2.0 - 1.0;
+            fabricN.xy *= fabricDetailNormalStrength;
+
+            normal = normalize( vec3(
+              normal.xy + fabricN.xy,
+              normal.z * fabricN.z
+            ) );
+          #endif
+          `
+        );
+
+        mat.userData.fabricDetailNormal.shader = shader;
+      };
+
+      mat.customProgramCacheKey = function () {
+        return "fabric-detail-normal-v1";
+      };
+
+      mat.needsUpdate = true;
+    }
+
+    function applyFabricSetToModel(root) {
+      if (!root) return;
+
+      root.traverse((obj) => {
+        if (!obj.isMesh) return;
+
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+        for (const mat of mats) {
+          if (!mat) continue;
+          if (mat.name !== TARGET_MAT_NAME) continue;
+
+          // _BASE is ignored on purpose
+
+          // Product/seam normal from GLB stays.
+          // Fabric _NRM is mixed on top.
+          if (currentFabricSet.normal) {
+            enableFabricDetailNormal(mat, currentFabricSet.normal, {
+              repeat: getFabricRepeat(),
+              strength: getFabricStrength()
+            });
+          }
+
+          if (currentFabricSet.alpha) {
+            applyFabricUtilityTiling(currentFabricSet.alpha, mat);
+            mat.alphaMap = currentFabricSet.alpha;
+            if (mat.alphaTest === 0) mat.alphaTest = 0.5;
+            mat.transparent = true;
+          }
+
+          if (currentFabricSet.rough) {
+            applyFabricUtilityTiling(currentFabricSet.rough, mat);
+            mat.roughnessMap = currentFabricSet.rough;
+          }
+
+          if (currentFabricSet.metal) {
+            applyFabricUtilityTiling(currentFabricSet.metal, mat);
+            mat.metalnessMap = currentFabricSet.metal;
+          }
+
+          if (currentFabricSet.ao) {
+            applyFabricUtilityTiling(currentFabricSet.ao, mat);
+            mat.aoMap = currentFabricSet.ao;
+          }
+
+          if (currentFabricSet.disp) {
+            applyFabricUtilityTiling(currentFabricSet.disp, mat);
+            mat.displacementMap = currentFabricSet.disp;
+            mat.displacementScale = getFabricDispStrength();
+          } else {
+            mat.displacementMap = null;
+            mat.displacementScale = 0;
+          }
+
+          if (currentFabricSet.bump) {
+            applyFabricUtilityTiling(currentFabricSet.bump, mat);
+            mat.bumpMap = currentFabricSet.bump;
+          }
+
+          mat.needsUpdate = true;
+
+          console.log("Applied fabric runtime set to material:", mat.name, {
+            alphaMap: mat.alphaMap,
+            roughnessMap: mat.roughnessMap,
+            metalnessMap: mat.metalnessMap,
+            aoMap: mat.aoMap,
+            displacementMap: mat.displacementMap,
+            bumpMap: mat.bumpMap,
+            detailNormal: currentFabricSet.normal
+          });
+        }
+      });
+    }
+
+    function detectFabricMapRole(filename) {
+      const name = filename.toUpperCase();
+
+      if (/_NRM(\.|$)/.test(name) || /_NORMAL(\.|$)/.test(name)) return "normal";
+      if (/_ALPHA(\.|$)/.test(name) || /_OPACITY(\.|$)/.test(name)) return "alpha";
+      if (/_ROUGH(\.|$)/.test(name) || /_ROUGHNESS(\.|$)/.test(name)) return "rough";
+      if (/_MTL(\.|$)/.test(name) || /_METAL(\.|$)/.test(name) || /_METALLIC(\.|$)/.test(name)) return "metal";
+      if (/_AO(\.|$)/.test(name)) return "ao";
+      if (/_DISP(\.|$)/.test(name) || /_DISPLACEMENT(\.|$)/.test(name) || /_HEIGHT(\.|$)/.test(name)) return "disp";
+      if (/_BUMP(\.|$)/.test(name)) return "bump";
+      if (/_BASE(\.|$)/.test(name) || /_ALBEDO(\.|$)/.test(name) || /_COLOR(\.|$)/.test(name)) return "base";
+
+      return null;
+    }
+
+    async function loadFabricMapSet(fileList) {
+      const newSet = {
+        normal: null,
+        alpha: null,
+        rough: null,
+        metal: null,
+        ao: null,
+        disp: null,
+        bump: null,
+        base: null
+      };
+
+      for (const file of Array.from(fileList)) {
+        const role = detectFabricMapRole(file.name);
+        if (!role) {
+          console.log("Skipped fabric file with unknown role:", file.name);
+          continue;
+        }
+
+        const tex = await imageFileToTexture(file, false);
+        newSet[role] = tex;
+      }
+
+      return newSet;
+    }
+
+    async function refreshDesignFromCurrentSvgText() {
+      if (!currentModelScene) {
+        setStatus("Upload a model first.");
+        return;
+      }
+      if (!currentSvgText) {
+        setStatus("No SVG loaded to refresh.");
+        return;
+      }
+
+      try {
+        svgDoc = parseSvgText(currentSvgText);
+        const ids = list3DPartIds(svgDoc);
+        clearSvgPartsUI();
+        buildSvgPartsUI(ids);
+
+        const { w, h } = getModelBaseColorSize(currentModelScene, 2048, 2048);
+
+        if (currentBaseTexture) currentBaseTexture.dispose();
+        currentBaseTexture = await svgTextToTexture(svgSerializer.serializeToString(svgDoc.documentElement), w, h);
+        currentBaseTexture.channel = 1;
+        applyTextureToModel(currentModelScene, currentBaseTexture);
+
+        setStatus("Design refreshed.");
+      } catch (err) {
+        console.error(err);
+        setStatus("Refresh failed (see console).");
+      }
+    }
+
+    function scheduleSvgTextureUpdate(isFinal) {
+      if (!svgDoc || !currentModelScene) return;
+
+      if (pendingFullTimer) {
+        clearTimeout(pendingFullTimer);
+        pendingFullTimer = 0;
+      }
+
+      if (pendingRaf) cancelAnimationFrame(pendingRaf);
+      pendingRaf = requestAnimationFrame(async () => {
+        pendingRaf = 0;
+
+        try {
+          const { w, h } = getModelBaseColorSize(currentModelScene, 2048, 2048);
+
+          let pw = w, ph = h;
+          if (!isFinal) {
+            const maxSide = Math.max(w, h);
+            const scale = Math.min(1024 / maxSide, 1);
+            pw = Math.max(1, Math.round(w * scale));
+            ph = Math.max(1, Math.round(h * scale));
+          }
+
+          const svgText = svgSerializer.serializeToString(svgDoc.documentElement);
+
+          if (currentBaseTexture) currentBaseTexture.dispose();
+          currentBaseTexture = await svgTextToTexture(svgText, pw, ph);
+          currentBaseTexture.channel = 1;
+          applyTextureToModel(currentModelScene, currentBaseTexture);
+
+          if (!isFinal) {
+            pendingFullTimer = setTimeout(() => {
+              scheduleSvgTextureUpdate(true);
+            }, 150);
+          }
+        } catch (err) {
+          console.error(err);
+        }
+      });
+    }
+
+    downloadBtn.addEventListener("click", () => {
+      let svgText = null;
+
+      if (svgDoc) {
+        svgText = svgSerializer.serializeToString(svgDoc.documentElement);
+      } else if (currentSvgText) {
+        svgText = currentSvgText;
+      }
+
+      if (!svgText) {
+        setStatus("No SVG loaded to download.");
+        return;
+      }
+
+      const base = (texInput.files?.[0]?.name || "Design.svg").replace(/\.svg$/i, "");
+      const outName = `${base}_edited.svg`;
+
+      const blob = new Blob([svgText], { type: "image/svg+xml;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = outName;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setStatus(`Downloaded: ${outName}`);
+    });
+
+    refreshBtn.addEventListener("click", refreshDesignFromCurrentSvgText);
+
+    texInput.addEventListener("change", async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
       texInput.value = "";
-      return;
-  }
 
-  if (!currentModelScene) {
-      setStatus("Upload a model first, then upload a texture.");
-      return;
-  }
+      const name = file.name.toLowerCase();
+      if (!name.endsWith(".svg")) {
+        setStatus("Please upload an .svg file");
+        return;
+      }
 
+      if (!currentModelScene) {
+        setStatus("Upload a model first, then upload a texture.");
+        return;
+      }
 
-  try {
-      setStatus(`Loading texture: ${file.name} ...`);
+      try {
+        setStatus(`Loading texture: ${file.name} ...`);
 
-      // dispose old texture if any
-      if (currentBaseTexture) currentBaseTexture.dispose();
+        if (currentBaseTexture) currentBaseTexture.dispose();
 
-      currentSvgText = await file.text();
+        currentSvgText = await file.text();
 
-      const doc = parseSvgText(currentSvgText);
-      const ids = list3DPartIds(doc);
-      svgDoc = doc;
+        const doc = parseSvgText(currentSvgText);
+        const ids = list3DPartIds(doc);
+        svgDoc = doc;
 
+        clearSvgPartsUI();
+        buildSvgPartsUI(ids);
 
-      clearSvgPartsUI();
-      buildSvgPartsUI(ids);
+        const { w, h } = getModelBaseColorSize(currentModelScene, 2048, 2048);
 
-      const { w, h } = getModelBaseColorSize(currentModelScene, 2048, 2048);
+        if (currentBaseTexture) currentBaseTexture.dispose();
+        currentBaseTexture = await svgTextToTexture(currentSvgText, w, h);
+        currentBaseTexture.channel = 1;
+        applyTextureToModel(currentModelScene, currentBaseTexture);
 
-      if (currentBaseTexture) currentBaseTexture.dispose();
-      currentBaseTexture = await svgTextToTexture(currentSvgText, w, h);
-      currentBaseTexture.channel = 1; // your correct channel
-      applyTextureToModel(currentModelScene, currentBaseTexture);
-      fixCullingAndTransparency(currentModelScene);
+        setStatus(`Applied texture: ${file.name}`);
+      } catch (err) {
+        console.error(err);
+        setStatus("Failed to load SVG texture (see console).");
+      }
+    });
 
-      setStatus(`Applied texture: ${file.name}`);
-  } catch (err) {
-      console.error(err);
-      setStatus("Failed to load SVG texture (see console).");
-  }
-  });
+    fabricMapsInput.addEventListener("change", async (e) => {
+      const files = e.target.files;
+      if (!files || files.length === 0) return;
 
+      if (!currentModelScene) {
+        setStatus("Upload a model first, then select the fabric map set.");
+        fabricMapsInput.value = "";
+        return;
+      }
+
+      try {
+        setStatus(`Loading fabric map set (${files.length} files) ...`);
+
+        disposeFabricSet(currentFabricSet);
+        currentFabricSet = await loadFabricMapSet(files);
+
+        applyFabricSetToModel(currentModelScene);
+
+        const loadedRoles = Object.entries(currentFabricSet)
+          .filter(([_, v]) => !!v)
+          .map(([k]) => k)
+          .join(", ");
+
+        setStatus(`Applied fabric map set. Loaded: ${loadedRoles || "none"}`);
+      } catch (err) {
+        console.error(err);
+        setStatus("Failed to load fabric map set.");
+      }
+
+      fabricMapsInput.value = "";
+    });
+
+    fabricRepeatInput.addEventListener("change", () => {
+      if (!currentModelScene) return;
+      applyFabricSetToModel(currentModelScene);
+      setStatus(`Updated fabric repeat to ${getFabricRepeat()}.`);
+    });
+
+    fabricStrengthInput.addEventListener("change", () => {
+      if (!currentModelScene) return;
+      applyFabricSetToModel(currentModelScene);
+      setStatus(`Updated fabric normal strength to ${getFabricStrength()}.`);
+    });
+
+    fabricDispStrengthInput.addEventListener("change", () => {
+      if (!currentModelScene) return;
+      applyFabricSetToModel(currentModelScene);
+      setStatus(`Updated displacement strength to ${getFabricDispStrength()}.`);
+    });
 
     function resetView() {
       if (modelRoot.children.length > 0) frameToObject(modelRoot);
       else frameToObject(placeholder);
     }
+
     resetBtn.addEventListener("click", resetView);
     frameToObject(placeholder);
 
@@ -618,7 +972,15 @@ texInput.addEventListener("change", async (e) => {
           placeholder.visible = false;
           modelRoot.add(gltf.scene);
           currentModelScene = gltf.scene;
+
           fixCullingAndTransparency(currentModelScene);
+
+          if (currentBaseTexture) {
+            applyTextureToModel(currentModelScene, currentBaseTexture);
+          }
+
+          applyFabricSetToModel(currentModelScene);
+
           setStatus(`Loaded: ${file.name}`);
           frameToObject(gltf.scene);
         },
@@ -638,6 +1000,7 @@ texInput.addEventListener("change", async (e) => {
       controls.update();
       renderer.render(scene, camera);
     }
+
     animate();
   </script>
 </body>
